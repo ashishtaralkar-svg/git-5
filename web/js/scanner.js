@@ -1,16 +1,19 @@
 // In-browser document scanner for mobile web with automatic document
-// detection, auto-crop and perspective correction (via OpenCV.js), mirroring
-// the ML Kit experience of the Android app:
-//   - live edge/document detection with an on-screen outline
-//   - auto-capture when a document is held steady (toggleable)
-//   - perspective warp → deskewed, cropped page
-//   - Original / Color / B&W enhancement filters
-//   - multi-page, torch, retake
-// If OpenCV.js fails to load, it degrades gracefully to full-frame capture.
+// detection, auto-crop and perspective correction (OpenCV.js), mirroring the
+// ML Kit experience of the Android app — designed to stay responsive:
+//   - the live preview is the native <video> element (GPU-composited); JS never
+//     draws it frame-by-frame, so the page can't jank/hang on the preview.
+//   - document detection runs on a throttled timer (~4x/sec) on a tiny 480px
+//     snapshot, guarded so a slow or failing detection never locks the UI.
+//   - the camera + manual shutter work immediately, even before OpenCV loads;
+//     if OpenCV never loads, it simply captures the full frame.
+//   - auto-capture when the document is held steady, perspective warp + crop,
+//     Original / Color / B&W enhancement, multi-page, torch, retake.
 
 const OPENCV_URL = 'https://docs.opencv.org/4.x/opencv.js';
-const MAX_OUT_EDGE = 1600; // cap warped output for storage/perf
-const DETECT_EVERY_MS = 110;
+const MAX_OUT_EDGE = 1600;
+const DETECT_INTERVAL_MS = 220;
+const DETECT_WIDTH = 480;
 
 let cvPromise = null;
 function loadOpenCV() {
@@ -21,18 +24,17 @@ function loadOpenCV() {
         script.src = OPENCV_URL;
         script.async = true;
         let settled = false;
-        const done = (val) => { if (!settled) { settled = true; resolve(val); } };
-        const ready = () => {
+        const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+        script.onload = () => {
             const cv = window.cv;
             if (!cv) return done(null);
             if (cv.Mat) return done(cv);
             if (typeof cv.then === 'function') { cv.then((c) => { window.cv = c; done(c); }); return; }
             cv.onRuntimeInitialized = () => done(window.cv);
         };
-        script.onload = ready;
         script.onerror = () => done(null);
         document.head.appendChild(script);
-        setTimeout(() => done(window.cv && window.cv.Mat ? window.cv : null), 15000); // fallback timeout
+        setTimeout(() => done(window.cv && window.cv.Mat ? window.cv : null), 12000);
     });
     return cvPromise;
 }
@@ -41,12 +43,12 @@ export function openScanner() {
     return new Promise((resolve, reject) => {
         const pages = [];
         let stream = null, track = null, torchOn = false;
-        let cv = null;
-        let rafId = null, lastDetect = 0;
-        let latestQuad = null;      // in video-pixel coords
+        let cv = null, detecting = false;
+        let detectTimer = null, rafId = null;
+        let latestQuad = null;          // video-pixel coords
         let stableCount = 0, lastCentroid = null;
         let autoMode = true;
-        let mode = 'live';          // 'live' | 'review'
+        let mode = 'live';
         let originalImageData = null;
 
         const root = document.createElement('div');
@@ -58,8 +60,8 @@ export function openScanner() {
                 <span class="spacer"></span>
                 <button class="scan-side-btn" data-act="torch" aria-label="Flash">⚡</button>
             </div>
-            <video autoplay playsinline muted class="hidden"></video>
-            <canvas class="live"></canvas>
+            <video autoplay playsinline muted></video>
+            <canvas class="overlay"></canvas>
             <canvas class="preview hidden"></canvas>
 
             <div class="filter-bar review hidden">
@@ -81,14 +83,14 @@ export function openScanner() {
         document.getElementById('modal-root').appendChild(root);
 
         const video = root.querySelector('video');
-        const live = root.querySelector('canvas.live');
-        const liveCtx = live.getContext('2d');
+        const overlay = root.querySelector('canvas.overlay');
+        const octx = overlay.getContext('2d');
         const review = root.querySelector('canvas.preview');
-        const reviewCtx = review.getContext('2d', { willReadFrequently: true });
-        const detCanvas = document.createElement('canvas');   // small, for detection
-        const detCtx = detCanvas.getContext('2d', { willReadFrequently: true });
-        const fullCanvas = document.createElement('canvas');  // full-res frame for warp
-        const fullCtx = fullCanvas.getContext('2d');
+        const rctx = review.getContext('2d', { willReadFrequently: true });
+        const det = document.createElement('canvas');
+        const dctx = det.getContext('2d', { willReadFrequently: true });
+        const full = document.createElement('canvas');
+        const fctx = full.getContext('2d');
         const statusEl = root.querySelector('#scan-status');
 
         const setStatus = (t) => { statusEl.textContent = t; };
@@ -96,22 +98,37 @@ export function openScanner() {
         const updateCount = () => { root.querySelector('.count').textContent = pages.length ? ` ${pages.length}` : ''; };
         const setAutoBtn = () => root.querySelector('[data-act=auto]').classList.toggle('active', autoMode);
 
-        function sizeCanvas() {
+        function sizeOverlay() {
             const dpr = Math.min(window.devicePixelRatio || 1, 2);
-            live.width = Math.round(live.clientWidth * dpr);
-            live.height = Math.round(live.clientHeight * dpr);
+            overlay.width = Math.round(overlay.clientWidth * dpr);
+            overlay.height = Math.round(overlay.clientHeight * dpr);
+            octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+
+        // Cover-fit mapping: video-pixel coords → overlay CSS-px coords.
+        function cover() {
+            const ew = overlay.clientWidth, eh = overlay.clientHeight;
+            const vw = video.videoWidth, vh = video.videoHeight;
+            if (!vw || !vh) return null;
+            const scale = Math.max(ew / vw, eh / vh);
+            return { scale, dx: (ew - vw * scale) / 2, dy: (eh - vh * scale) / 2, vw, vh, ew, eh };
         }
 
         function cleanup(result) {
+            if (detectTimer) clearInterval(detectTimer);
             if (rafId) cancelAnimationFrame(rafId);
             if (stream) stream.getTracks().forEach(t => t.stop());
-            window.removeEventListener('resize', sizeCanvas);
+            window.removeEventListener('resize', sizeOverlay);
             root.remove();
             resolve(result);
         }
 
         async function start() {
-            loadOpenCV().then((c) => { cv = c; });
+            loadOpenCV().then((c) => {
+                cv = c;
+                if (c) setStatus('Point at a document');
+                else setStatus('Tap the shutter to capture');
+            });
             try {
                 stream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
@@ -120,100 +137,91 @@ export function openScanner() {
                 video.srcObject = stream;
                 track = stream.getVideoTracks()[0];
                 await video.play().catch(() => {});
-                sizeCanvas();
+                sizeOverlay();
                 setAutoBtn();
                 updateCount();
                 setStatus('Point at a document');
-                rafId = requestAnimationFrame(loop);
+                rafId = requestAnimationFrame(drawOverlay);        // light: only draws the outline
+                detectTimer = setInterval(tick, DETECT_INTERVAL_MS); // throttled detection
             } catch (err) {
                 root.remove();
                 reject(err);
             }
         }
 
-        // Cover-fit mapping from video pixels → live-canvas pixels.
-        function coverTransform(vw, vh) {
-            const cw = live.width, ch = live.height;
-            const scale = Math.max(cw / vw, ch / vh);
-            return { scale, dx: (cw - vw * scale) / 2, dy: (ch - vh * scale) / 2 };
+        // rAF only clears + redraws the (cheap) outline; no video pixels touched.
+        function drawOverlay() {
+            rafId = requestAnimationFrame(drawOverlay);
+            if (mode !== 'live') return;
+            octx.clearRect(0, 0, overlay.clientWidth, overlay.clientHeight);
+            const m = cover();
+            if (!m || !latestQuad) return;
+            const pts = latestQuad.map(p => ({ x: m.dx + p.x * m.scale, y: m.dy + p.y * m.scale }));
+            octx.lineWidth = 3;
+            octx.strokeStyle = '#4ade80';
+            octx.fillStyle = 'rgba(74,222,128,0.15)';
+            octx.beginPath();
+            pts.forEach((p, i) => i ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y));
+            octx.closePath();
+            octx.fill(); octx.stroke();
         }
 
-        function loop(ts) {
-            rafId = requestAnimationFrame(loop);
-            if (mode !== 'live') return;
+        // Throttled, guarded detection. Runs at most once per interval and never
+        // overlaps itself, so a slow frame can't pile up and hang the page.
+        function tick() {
+            if (mode !== 'live' || !cv || detecting) return;
             const vw = video.videoWidth, vh = video.videoHeight;
             if (!vw || !vh) return;
-
-            const t = coverTransform(vw, vh);
-            liveCtx.drawImage(video, 0, 0, vw, vh, t.dx, t.dy, vw * t.scale, vh * t.scale);
-
-            if (cv && ts - lastDetect > DETECT_EVERY_MS) {
-                lastDetect = ts;
-                detectFrame(vw, vh);
-            }
-            if (latestQuad) drawOutline(latestQuad, t);
-        }
-
-        function detectFrame(vw, vh) {
-            const dw = 480, dh = Math.round(dw * vh / vw);
-            detCanvas.width = dw; detCanvas.height = dh;
-            detCtx.drawImage(video, 0, 0, dw, dh);
-            const quad = detectDocument(cv, detCanvas);
-            if (quad) {
-                const sx = vw / dw, sy = vh / dh;
-                const q = quad.map(p => ({ x: p.x * sx, y: p.y * sy }));
-                const c = centroid(q);
-                if (lastCentroid && dist(c, lastCentroid) < vw * 0.03) stableCount++;
-                else stableCount = 0;
-                lastCentroid = c;
-                latestQuad = q;
-                if (autoMode && stableCount >= 6) { stableCount = 0; capture(); return; }
-                setStatus(autoMode ? 'Hold steady…' : 'Document detected — tap shutter');
-            } else {
-                latestQuad = null; stableCount = 0; lastCentroid = null;
-                setStatus('Searching for document…');
+            detecting = true;
+            try {
+                const dw = DETECT_WIDTH, dh = Math.max(1, Math.round(dw * vh / vw));
+                det.width = dw; det.height = dh;
+                dctx.drawImage(video, 0, 0, dw, dh);
+                const quad = detectDocument(cv, det);
+                if (quad) {
+                    const sx = vw / dw, sy = vh / dh;
+                    const q = quad.map(p => ({ x: p.x * sx, y: p.y * sy }));
+                    const c = centroid(q);
+                    if (lastCentroid && dist(c, lastCentroid) < vw * 0.035) stableCount++;
+                    else stableCount = 0;
+                    lastCentroid = c; latestQuad = q;
+                    if (autoMode && stableCount >= 5) { stableCount = 0; capture(); }
+                    else setStatus(autoMode ? 'Hold steady…' : 'Detected — tap shutter');
+                } else {
+                    latestQuad = null; stableCount = 0; lastCentroid = null;
+                    setStatus('Searching for document…');
+                }
+            } catch (_) {
+                cv = null; // disable detection on error; manual capture still works
+                setStatus('Tap the shutter to capture');
+            } finally {
+                detecting = false;
             }
         }
 
-        function drawOutline(quad, t) {
-            const pts = quad.map(p => ({ x: t.dx + p.x * t.scale, y: t.dy + p.y * t.scale }));
-            liveCtx.save();
-            liveCtx.lineWidth = 3;
-            liveCtx.strokeStyle = '#4ade80';
-            liveCtx.fillStyle = 'rgba(74,222,128,0.15)';
-            liveCtx.beginPath();
-            pts.forEach((p, i) => i ? liveCtx.lineTo(p.x, p.y) : liveCtx.moveTo(p.x, p.y));
-            liveCtx.closePath();
-            liveCtx.fill(); liveCtx.stroke();
-            liveCtx.restore();
-        }
-
-        // ----- capture -----
         function capture() {
             const vw = video.videoWidth, vh = video.videoHeight;
             if (!vw || !vh) return;
-            fullCanvas.width = vw; fullCanvas.height = vh;
-            fullCtx.drawImage(video, 0, 0, vw, vh);
+            full.width = vw; full.height = vh;
+            fctx.drawImage(video, 0, 0, vw, vh);
 
-            let outCanvas;
+            let outCanvas = full;
             if (cv && latestQuad) {
-                try { outCanvas = warpPerspectiveCanvas(cv, fullCanvas, latestQuad); }
-                catch (_) { outCanvas = fullCanvas; }
-            } else {
-                outCanvas = fullCanvas;
+                try { outCanvas = warpPerspectiveCanvas(cv, full, latestQuad); } catch (_) { outCanvas = full; }
             }
-            // Move result into the review canvas, capped for storage.
             let w = outCanvas.width, h = outCanvas.height;
             const longest = Math.max(w, h);
             if (longest > MAX_OUT_EDGE) { const s = MAX_OUT_EDGE / longest; w = Math.round(w * s); h = Math.round(h * s); }
             review.width = w; review.height = h;
-            reviewCtx.drawImage(outCanvas, 0, 0, w, h);
-            originalImageData = reviewCtx.getImageData(0, 0, w, h);
+            rctx.drawImage(outCanvas, 0, 0, w, h);
+            originalImageData = rctx.getImageData(0, 0, w, h);
 
             mode = 'review';
+            octx.clearRect(0, 0, overlay.clientWidth, overlay.clientHeight);
             applyFilter('color');
             review.classList.remove('hidden');
-            live.classList.add('hidden');
+            overlay.classList.add('hidden');
+            video.classList.add('hidden');
             show('.scan-controls.live', false);
             show('.filter-bar.review', true);
             show('.scan-controls.review', true);
@@ -225,11 +233,12 @@ export function openScanner() {
             mode = 'live';
             latestQuad = null; stableCount = 0; lastCentroid = null;
             review.classList.add('hidden');
-            live.classList.remove('hidden');
+            overlay.classList.remove('hidden');
+            video.classList.remove('hidden');
             show('.scan-controls.live', true);
             show('.filter-bar.review', false);
             show('.scan-controls.review', false);
-            setStatus('Point at a document');
+            setStatus(cv ? 'Point at a document' : 'Tap the shutter to capture');
         }
 
         function keep() {
@@ -242,11 +251,11 @@ export function openScanner() {
         function applyFilter(kind) {
             if (!originalImageData) return;
             const src = originalImageData.data;
-            const out = reviewCtx.createImageData(review.width, review.height);
+            const out = rctx.createImageData(review.width, review.height);
             if (kind === 'original') out.data.set(src);
             else if (kind === 'color') autoContrast(src, out.data);
             else if (kind === 'bw') grayscaleOtsu(src, out.data);
-            reviewCtx.putImageData(out, 0, 0);
+            rctx.putImageData(out, 0, 0);
         }
 
         async function toggleTorch() {
@@ -262,10 +271,10 @@ export function openScanner() {
 
         root.addEventListener('click', (e) => {
             const act = e.target.closest('[data-act]')?.dataset.act;
-            const filter = e.target.closest('[data-filter]')?.dataset.filter;
-            if (filter) {
-                root.querySelectorAll('.filter-chip').forEach(c => c.classList.toggle('active', c === e.target.closest('[data-filter]')));
-                applyFilter(filter);
+            const chip = e.target.closest('[data-filter]');
+            if (chip) {
+                root.querySelectorAll('.filter-chip').forEach(c => c.classList.toggle('active', c === chip));
+                applyFilter(chip.dataset.filter);
                 return;
             }
             switch (act) {
@@ -279,7 +288,7 @@ export function openScanner() {
             }
         });
 
-        window.addEventListener('resize', sizeCanvas);
+        window.addEventListener('resize', sizeOverlay);
         start();
     });
 }
