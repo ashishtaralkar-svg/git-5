@@ -5,9 +5,13 @@ Login → Search Application → Upload Documents → Preview → Upload → Upl
 and adapts the **Scan Document** feature to the device:
 
 - **On a mobile browser:** tapping *Scan Document* opens the device **camera**
-  full-screen with a live document frame, capture, multi-page scanning, and
-  **Original / Color / B&W** enhancement filters (client-side, using Canvas —
-  auto-contrast for Color, Otsu threshold for B&W).
+  full-screen with **automatic document detection** — a live green outline
+  tracks the page edges (OpenCV.js), and when the document is held steady it
+  **auto-captures**, then applies **perspective correction + auto-crop** (a
+  four-point warp) to produce a deskewed page, followed by **Original / Color /
+  B&W** enhancement (auto-contrast for Color, Otsu threshold for B&W).
+  Multi-page, torch, retake, and a manual shutter are all available. If
+  OpenCV.js can't load, it degrades gracefully to full-frame capture + filters.
 - **On a laptop/desktop browser:** tapping *Scan Document* shows a **popup**
   explaining the scanner is available on mobile devices only. Everything else
   (upload files, preview, upload, uploaded list) still works.

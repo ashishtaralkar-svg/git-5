@@ -221,7 +221,8 @@ input.error { border-color: var(--error); }
 
 /* ---------- Camera / scanner ---------- */
 .scanner { position: fixed; inset: 0; background: #000; z-index: 90; display: flex; flex-direction: column; }
-.scanner video, .scanner canvas.preview { width: 100%; height: 100%; object-fit: cover; flex: 1; background: #000; }
+.scanner video, .scanner canvas.live { width: 100%; height: 100%; object-fit: cover; flex: 1; background: #000; }
+.scanner canvas.preview { width: 100%; height: 100%; object-fit: contain; flex: 1; background: #000; }
 .scan-overlay {
     position: absolute; inset: 0; pointer-events: none;
     box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .35);
