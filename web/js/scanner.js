@@ -50,6 +50,7 @@ export function openScanner() {
         let autoMode = true;
         let mode = 'live';
         let originalImageData = null;
+        let videoReady = false, cvTried = false;
 
         const root = document.createElement('div');
         root.className = 'scanner';
@@ -123,26 +124,46 @@ export function openScanner() {
             resolve(result);
         }
 
+        function refreshStatus() {
+            if (mode !== 'live') return;
+            if (!videoReady) { setStatus('Starting camera…'); return; }
+            if (!cvTried) { setStatus('Tap to capture · loading auto-detect…'); return; }
+            if (!cv) { setStatus('Tap anywhere to capture'); return; }
+            setStatus(autoMode ? 'Point at a document' : 'Tap to capture');
+        }
+
+        function tryPlay() { const p = video.play(); if (p && p.catch) p.catch(() => {}); }
+
         async function start() {
-            loadOpenCV().then((c) => {
-                cv = c;
-                if (c) setStatus('Point at a document');
-                else setStatus('Tap the shutter to capture');
-            });
+            setAutoBtn();
+            updateCount();
+            setStatus('Starting camera…');
+
+            // Load OpenCV in the background — never blocks the camera or capture.
+            loadOpenCV().then((c) => { cv = c; cvTried = true; refreshStatus(); });
+
+            // Mark ready as soon as the stream produces frames (covers iOS timing).
+            video.addEventListener('loadedmetadata', () => { sizeOverlay(); tryPlay(); });
+            video.addEventListener('playing', () => { videoReady = true; sizeOverlay(); refreshStatus(); });
+            video.addEventListener('canplay', () => { videoReady = true; refreshStatus(); });
+
             try {
                 stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+                    video: { facingMode: { ideal: 'environment' } },
                     audio: false,
                 });
                 video.srcObject = stream;
                 track = stream.getVideoTracks()[0];
-                await video.play().catch(() => {});
-                sizeOverlay();
-                setAutoBtn();
-                updateCount();
-                setStatus('Point at a document');
-                rafId = requestAnimationFrame(drawOverlay);        // light: only draws the outline
-                detectTimer = setInterval(tick, DETECT_INTERVAL_MS); // throttled detection
+                tryPlay(); // don't await — some browsers resolve late; events flip videoReady
+                rafId = requestAnimationFrame(drawOverlay);
+                detectTimer = setInterval(tick, DETECT_INTERVAL_MS);
+
+                // Watchdog: if no frames after 4.5s, tell the user how to proceed.
+                setTimeout(() => {
+                    if (!videoReady && mode === 'live') {
+                        setStatus("Camera didn't start — tap ✕ and use “Upload from Mobile”, or allow camera access.");
+                    }
+                }, 4500);
             } catch (err) {
                 root.remove();
                 reject(err);
@@ -201,7 +222,7 @@ export function openScanner() {
 
         function capture() {
             const vw = video.videoWidth, vh = video.videoHeight;
-            if (!vw || !vh) return;
+            if (!vw || !vh) { setStatus('Camera not ready yet — one moment…'); return; }
             full.width = vw; full.height = vh;
             fctx.drawImage(video, 0, 0, vw, vh);
 
@@ -238,7 +259,7 @@ export function openScanner() {
             show('.scan-controls.live', true);
             show('.filter-bar.review', false);
             show('.scan-controls.review', false);
-            setStatus(cv ? 'Point at a document' : 'Tap the shutter to capture');
+            refreshStatus();
         }
 
         function keep() {
@@ -277,6 +298,8 @@ export function openScanner() {
                 applyFilter(chip.dataset.filter);
                 return;
             }
+            // Tap anywhere on the live preview to capture (large, forgiving target).
+            if (!act && mode === 'live' && (e.target === video || e.target === overlay)) { capture(); return; }
             switch (act) {
                 case 'capture': if (mode === 'live') capture(); break;
                 case 'keep': keep(); break;

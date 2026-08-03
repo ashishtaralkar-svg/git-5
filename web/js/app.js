@@ -270,11 +270,20 @@ async function onScan(appNo) {
             }
             renderUpload(encodeURIComponent(appNo));
         } catch (err) {
-            // Permission denied or camera unavailable → fall back to native capture.
-            if (err && (err.name === 'NotAllowedError' || err.name === 'NotFoundError')) {
-                toast(err.name === 'NotAllowedError' ? 'Camera permission denied.' : 'No camera found.');
-            }
-            document.getElementById('cam-input').click();
+            // Camera couldn't start → explain, and offer the native camera as fallback.
+            const name = (err && err.name) || 'Error';
+            const msg = name === 'NotAllowedError'
+                ? 'Camera permission was denied. Enable camera access for this site in your browser settings, then try again.'
+                : name === 'NotFoundError'
+                    ? 'No camera was found on this device.'
+                    : `Camera couldn't start (${name}). You can use your phone's camera app instead.`;
+            modal({
+                icon: '📷', title: 'Camera unavailable', body: msg,
+                actions: [
+                    { label: 'Use phone camera', variant: 'ghost', onClick: () => document.getElementById('cam-input').click() },
+                    { label: 'Cancel', variant: 'ghost' },
+                ],
+            });
         }
         return;
     }
