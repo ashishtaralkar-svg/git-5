@@ -51,6 +51,7 @@ export function openScanner() {
         let mode = 'live';
         let originalImageData = null;
         let videoReady = false, cvTried = false;
+        const cleanupHooks = [];
 
         const root = document.createElement('div');
         root.className = 'scanner';
@@ -63,6 +64,7 @@ export function openScanner() {
             </div>
             <video autoplay playsinline muted></video>
             <canvas class="overlay"></canvas>
+            <div class="hitlayer"></div>
             <canvas class="preview hidden"></canvas>
             <button class="tap-start hidden" data-act="start">▶<span>Tap to start camera</span></button>
 
@@ -122,6 +124,7 @@ export function openScanner() {
             if (rafId) cancelAnimationFrame(rafId);
             if (stream) stream.getTracks().forEach(t => t.stop());
             window.removeEventListener('resize', sizeOverlay);
+            cleanupHooks.forEach(fn => { try { fn(); } catch (_) {} });
             root.remove();
             resolve(result);
         }
@@ -305,28 +308,7 @@ export function openScanner() {
             } catch (_) { /* ignore */ }
         }
 
-        let lastHandled = 0;
-        function onTap(e) {
-            // Debounce so a touch that also emits a synthetic click doesn't double-fire.
-            const now = Date.now();
-            if (now - lastHandled < 350) return;
-            lastHandled = now;
-
-            const act = e.target.closest('[data-act]')?.dataset.act;
-            const chip = e.target.closest('[data-filter]');
-            const dbg = root.querySelector('#scan-debug');
-            if (dbg) dbg.textContent = 'tap: ' + e.type + ' · ' + (e.target.tagName || '?').toLowerCase()
-                + (act ? ' · act=' + act : '') + ' · ready=' + videoReady;
-            if (chip) {
-                root.querySelectorAll('.filter-chip').forEach(c => c.classList.toggle('active', c === chip));
-                applyFilter(chip.dataset.filter);
-                return;
-            }
-            // Before the stream is playing, any tap forces playback (user gesture).
-            if (mode === 'live' && !videoReady) { tryPlay(); return; }
-            // Once live, a tap anywhere except the buttons captures (forgiving target).
-            const onControl = e.target.closest('.scan-controls, .scan-topbar, .filter-bar, .tap-start');
-            if (mode === 'live' && !act && !chip && !onControl) { capture(); return; }
+        function actOn(act) {
             switch (act) {
                 case 'start': tryPlay(); break;
                 case 'capture': if (mode === 'live') capture(); break;
@@ -338,9 +320,49 @@ export function openScanner() {
                 case 'close': cleanup(pages); break;
             }
         }
-        // pointerup fires reliably on touch; click is the fallback for mouse.
-        root.addEventListener('pointerup', onTap);
-        root.addEventListener('click', onTap);
+
+        // Direct, per-element handlers (no reliance on event delegation). Each
+        // element listens for both pointerup and click; a shared 300ms debounce
+        // stops the synthetic click that follows a touch from double-firing.
+        let lastTap = 0;
+        function bind(el, fn) {
+            if (!el) return;
+            const g = (e) => {
+                const now = Date.now();
+                if (now - lastTap < 300) return;
+                lastTap = now;
+                if (e && e.cancelable) e.preventDefault();
+                e.stopPropagation();
+                fn(e);
+            };
+            el.addEventListener('pointerup', g);
+            el.addEventListener('click', g);
+        }
+
+        root.querySelectorAll('[data-act]').forEach(btn => bind(btn, () => actOn(btn.dataset.act)));
+        root.querySelectorAll('[data-filter]').forEach(chip => bind(chip, () => {
+            root.querySelectorAll('.filter-chip').forEach(c => c.classList.toggle('active', c === chip));
+            applyFilter(chip.dataset.filter);
+        }));
+        // Full-area layer above the video: tap to start (if not playing) or capture.
+        bind(root.querySelector('.hitlayer'), () => {
+            if (mode !== 'live') return;
+            if (!videoReady) { tryPlay(); return; }
+            capture();
+        });
+
+        // Always-on tap readout (capture phase, document level) so we can see the
+        // real element under each tap even if something is intercepting events.
+        const dbgHandler = (e) => {
+            const dbg = root.querySelector('#scan-debug');
+            if (!dbg) return;
+            const t = e.target;
+            dbg.textContent = 'tap ▸ ' + (t.tagName || '?').toLowerCase()
+                + (t.className && t.className.toString ? '.' + t.className.toString().split(' ')[0] : '')
+                + ' · ready=' + videoReady;
+        };
+        document.addEventListener('pointerdown', dbgHandler, true);
+        cleanupHooks.push(() => document.removeEventListener('pointerdown', dbgHandler, true));
 
         window.addEventListener('resize', sizeOverlay);
         start();
