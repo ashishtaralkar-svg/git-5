@@ -1,5 +1,5 @@
-import { addDocument, deleteDocument, updateStatus, listPending, listUploaded } from './db.js';
-import { openScanner } from './scanner.js';
+import { addDocument, deleteDocument, updateStatus, listPending, listUploaded } from './db.js?v=8';
+import { openScanner } from './scanner.js?v=8';
 
 // ---------------- constants / helpers ----------------
 const DEMO_USER = 'hdfc';
