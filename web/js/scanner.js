@@ -64,6 +64,7 @@ export function openScanner() {
             <video autoplay playsinline muted></video>
             <canvas class="overlay"></canvas>
             <canvas class="preview hidden"></canvas>
+            <button class="tap-start hidden" data-act="start">▶<span>Tap to start camera</span></button>
 
             <div class="filter-bar review hidden">
                 <button class="filter-chip" data-filter="original">Original</button>
@@ -132,7 +133,13 @@ export function openScanner() {
             setStatus(autoMode ? 'Point at a document' : 'Tap to capture');
         }
 
-        function tryPlay() { const p = video.play(); if (p && p.catch) p.catch(() => {}); }
+        const tapStartBtn = () => root.querySelector('.tap-start');
+        function tryPlay() {
+            video.muted = true; video.playsInline = true;
+            const p = video.play();
+            if (p && p.catch) p.catch(() => {});
+        }
+        function showTapStart(on) { tapStartBtn().classList.toggle('hidden', !on); }
 
         async function start() {
             setAutoBtn();
@@ -142,10 +149,11 @@ export function openScanner() {
             // Load OpenCV in the background — never blocks the camera or capture.
             loadOpenCV().then((c) => { cv = c; cvTried = true; refreshStatus(); });
 
-            // Mark ready as soon as the stream produces frames (covers iOS timing).
+            // Mark ready as soon as the stream produces frames.
+            const onPlaying = () => { videoReady = true; showTapStart(false); sizeOverlay(); refreshStatus(); };
             video.addEventListener('loadedmetadata', () => { sizeOverlay(); tryPlay(); });
-            video.addEventListener('playing', () => { videoReady = true; sizeOverlay(); refreshStatus(); });
-            video.addEventListener('canplay', () => { videoReady = true; refreshStatus(); });
+            video.addEventListener('playing', onPlaying);
+            video.addEventListener('canplay', () => { tryPlay(); if (video.videoWidth) onPlaying(); });
 
             try {
                 stream = await navigator.mediaDevices.getUserMedia({
@@ -154,16 +162,18 @@ export function openScanner() {
                 });
                 video.srcObject = stream;
                 track = stream.getVideoTracks()[0];
-                tryPlay(); // don't await — some browsers resolve late; events flip videoReady
+                tryPlay(); // awaiting getUserMedia consumed the tap's user-activation…
                 rafId = requestAnimationFrame(drawOverlay);
                 detectTimer = setInterval(tick, DETECT_INTERVAL_MS);
 
-                // Watchdog: if no frames after 4.5s, tell the user how to proceed.
+                // …so if autoplay is blocked and no frames arrive shortly, reveal an
+                // explicit "Tap to start" button (a fresh user gesture reliably plays).
                 setTimeout(() => {
                     if (!videoReady && mode === 'live') {
-                        setStatus("Camera didn't start — tap ✕ and use “Upload from Mobile”, or allow camera access.");
+                        showTapStart(true);
+                        setStatus('Tap “Start camera” below');
                     }
-                }, 4500);
+                }, 1200);
             } catch (err) {
                 root.remove();
                 reject(err);
@@ -298,9 +308,12 @@ export function openScanner() {
                 applyFilter(chip.dataset.filter);
                 return;
             }
-            // Tap anywhere on the live preview to capture (large, forgiving target).
+            // Before the stream is playing, any tap forces playback (user gesture).
+            if (mode === 'live' && !videoReady) { tryPlay(); return; }
+            // Once live, tap anywhere on the preview to capture (large, forgiving target).
             if (!act && mode === 'live' && (e.target === video || e.target === overlay)) { capture(); return; }
             switch (act) {
+                case 'start': tryPlay(); break;
                 case 'capture': if (mode === 'live') capture(); break;
                 case 'keep': keep(); break;
                 case 'retake': backToLive(); break;
