@@ -330,59 +330,87 @@ function warp(srcCanvas, quad) {
     return out;
 }
 
-// ---------- lightweight edge-based corner guess (best effort) ----------
+// ---------- document region → corner guess (best effort, pure JS) ----------
+// Segment the page as the largest connected region that agrees with the centre
+// of the frame (Otsu threshold), then take that region's four extreme corners.
+// This snaps to the actual document instead of chasing background edges.
 function detectCorners(canvas) {
     const W = canvas.width, H = canvas.height;
-    // default: 7% inset rectangle
     const def = [
-        { x: W * 0.07, y: H * 0.07 }, { x: W * 0.93, y: H * 0.07 },
-        { x: W * 0.93, y: H * 0.93 }, { x: W * 0.07, y: H * 0.93 },
+        { x: W * 0.08, y: H * 0.08 }, { x: W * 0.92, y: H * 0.08 },
+        { x: W * 0.92, y: H * 0.92 }, { x: W * 0.08, y: H * 0.92 },
     ];
     try {
-        const dw = 240, dh = Math.max(1, Math.round(dw * H / W));
+        const dw = 320, dh = Math.max(1, Math.round(dw * H / W));
         const tmp = document.createElement('canvas'); tmp.width = dw; tmp.height = dh;
-        tmp.getContext('2d').drawImage(canvas, 0, 0, dw, dh);
-        const d = tmp.getContext('2d').getImageData(0, 0, dw, dh).data;
-        const gray = new Float32Array(dw * dh);
-        for (let i = 0, g = 0; i < d.length; i += 4, g++) gray[g] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-        // Sobel magnitude, collect strong edge points
-        const pts = [];
-        let sum = 0, cnt = 0;
-        const mag = new Float32Array(dw * dh);
-        for (let y = 1; y < dh - 1; y++) {
-            for (let x = 1; x < dw - 1; x++) {
-                const i = y * dw + x;
-                const gx = -gray[i - dw - 1] - 2 * gray[i - 1] - gray[i + dw - 1] + gray[i - dw + 1] + 2 * gray[i + 1] + gray[i + dw + 1];
-                const gy = -gray[i - dw - 1] - 2 * gray[i - dw] - gray[i - dw + 1] + gray[i + dw - 1] + 2 * gray[i + dw] + gray[i + dw + 1];
-                const m = Math.abs(gx) + Math.abs(gy);
-                mag[i] = m; sum += m; cnt++;
+        const tctx = tmp.getContext('2d');
+        tctx.drawImage(canvas, 0, 0, dw, dh);
+        const data = tctx.getImageData(0, 0, dw, dh).data;
+        const N = dw * dh;
+        const gray = new Uint8Array(N);
+        for (let i = 0, g = 0; g < N; i += 4, g++) gray[g] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+
+        const thr = otsuThreshold(gray);
+        // Which side of the threshold is the document? Ask the centre of the frame.
+        let hi = 0, lo = 0;
+        for (let y = (dh * 0.4) | 0; y < dh * 0.6; y++)
+            for (let x = (dw * 0.4) | 0; x < dw * 0.6; x++) (gray[y * dw + x] > thr ? hi++ : lo++);
+        const fgHigh = hi >= lo;
+        const fg = new Uint8Array(N);
+        for (let i = 0; i < N; i++) fg[i] = ((gray[i] > thr) === fgHigh) ? 1 : 0;
+
+        // Largest connected component (4-connectivity), tracking corner extremes.
+        const visited = new Uint8Array(N);
+        const stack = new Int32Array(N);
+        let best = null, bestSize = 0;
+        for (let start = 0; start < N; start++) {
+            if (visited[start] || !fg[start]) continue;
+            let sp = 0; stack[sp++] = start; visited[start] = 1;
+            let size = 0;
+            let tlv = 1e9, brv = -1e9, trv = -1e9, blv = 1e9;
+            let tlp, trp, brp, blp;
+            while (sp > 0) {
+                const idx = stack[--sp];
+                const x = idx % dw, y = (idx / dw) | 0;
+                size++;
+                const s = x + y, d = x - y;
+                if (s < tlv) { tlv = s; tlp = { x, y }; }
+                if (s > brv) { brv = s; brp = { x, y }; }
+                if (d > trv) { trv = d; trp = { x, y }; }
+                if (d < blv) { blv = d; blp = { x, y }; }
+                if (x > 0) { const j = idx - 1; if (!visited[j] && fg[j]) { visited[j] = 1; stack[sp++] = j; } }
+                if (x < dw - 1) { const j = idx + 1; if (!visited[j] && fg[j]) { visited[j] = 1; stack[sp++] = j; } }
+                if (y > 0) { const j = idx - dw; if (!visited[j] && fg[j]) { visited[j] = 1; stack[sp++] = j; } }
+                if (y < dh - 1) { const j = idx + dw; if (!visited[j] && fg[j]) { visited[j] = 1; stack[sp++] = j; } }
             }
+            if (size > bestSize) { bestSize = size; best = [tlp, trp, brp, blp]; }
         }
-        const thr = (sum / cnt) * 2.2;
-        for (let y = 1; y < dh - 1; y++) for (let x = 1; x < dw - 1; x++) if (mag[y * dw + x] > thr) pts.push({ x, y });
-        if (pts.length < 40) return def;
-        // Extreme points by the four corner-affinity functions (x+y, x-y, etc.)
-        let tl = pts[0], tr = pts[0], br = pts[0], bl = pts[0];
-        for (const p of pts) {
-            if (p.x + p.y < tl.x + tl.y) tl = p;
-            if (p.x - p.y > tr.x - tr.y) tr = p;
-            if (p.x + p.y > br.x + br.y) br = p;
-            if (p.x - p.y < bl.x - bl.y) bl = p;
-        }
+
+        // Reject if the region is too small (noise). A very large region (page fills
+        // the frame) is fine — corners land near the edges, which is correct.
+        if (!best || bestSize < 0.10 * N) return def;
         const sx = W / dw, sy = H / dh;
-        const scaled = [tl, tr, br, bl].map(p => ({ x: p.x * sx, y: p.y * sy }));
-        // sanity: area must be a decent fraction of the frame, else fall back
-        const area = quadArea(scaled);
-        if (area < 0.18 * W * H) return def;
-        return scaled;
+        return best.map(p => ({ x: p.x * sx, y: p.y * sy }));
     } catch (_) {
         return def;
     }
 }
-function quadArea(q) {
-    let a = 0;
-    for (let i = 0; i < 4; i++) { const p = q[i], n = q[(i + 1) % 4]; a += p.x * n.y - n.x * p.y; }
-    return Math.abs(a) / 2;
+
+function otsuThreshold(gray) {
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
+    const n = gray.length;
+    let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let sumB = 0, wB = 0, max = 0, thr = 127;
+    for (let i = 0; i < 256; i++) {
+        wB += hist[i]; if (!wB) continue;
+        const wF = n - wB; if (!wF) break;
+        sumB += i * hist[i];
+        const mB = sumB / wB, mF = (sum - sumB) / wF;
+        const v = wB * wF * (mB - mF) * (mB - mF);
+        if (v > max) { max = v; thr = i; }
+    }
+    return thr;
 }
 
 // ---------- enhancement filters ----------
