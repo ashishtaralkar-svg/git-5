@@ -322,17 +322,17 @@ export function openScanner() {
         }
 
         // Direct, per-element handlers (no reliance on event delegation). Each
-        // element listens for both pointerup and click; a shared 300ms debounce
-        // stops the synthetic click that follows a touch from double-firing.
-        let lastTap = 0;
+        // element listens for both pointerup and click with its OWN debounce, so
+        // the synthetic click that follows a touch doesn't double-fire, while a
+        // tap on one control never blocks a tap on another (the earlier bug).
         function bind(el, fn) {
             if (!el) return;
+            let last = 0;
             const g = (e) => {
                 const now = Date.now();
-                if (now - lastTap < 300) return;
-                lastTap = now;
+                if (now - last < 400) return;
+                last = now;
                 if (e && e.cancelable) e.preventDefault();
-                e.stopPropagation();
                 fn(e);
             };
             el.addEventListener('pointerup', g);
