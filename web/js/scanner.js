@@ -1,56 +1,24 @@
-// In-browser document scanner for mobile web with automatic document
-// detection, auto-crop and perspective correction (OpenCV.js), mirroring the
-// ML Kit experience of the Android app — designed to stay responsive:
-//   - the live preview is the native <video> element (GPU-composited); JS never
-//     draws it frame-by-frame, so the page can't jank/hang on the preview.
-//   - document detection runs on a throttled timer (~4x/sec) on a tiny 480px
-//     snapshot, guarded so a slow or failing detection never locks the UI.
-//   - the camera + manual shutter work immediately, even before OpenCV loads;
-//     if OpenCV never loads, it simply captures the full frame.
-//   - auto-capture when the document is held steady, perspective warp + crop,
-//     Original / Color / B&W enhancement, multi-page, torch, retake.
+// In-browser document scanner — pure JavaScript, no external libraries.
+// Flow (Adobe Scan style):
+//   1. Live camera → tap the shutter (or the preview) to capture.
+//   2. Crop screen: the photo with 4 draggable corner handles, auto-positioned
+//      to the detected document edges. Drag to adjust.
+//   3. Crop → perspective-corrects & deskews the page (JS homography warp).
+//   4. Enhance: Original / Color / B&W, then keep. Multi-page, torch, retake.
+// Everything runs locally with no 8MB library download, so it works reliably on
+// mobile where OpenCV.js often failed to load.
 
-const OPENCV_URL = 'https://docs.opencv.org/4.x/opencv.js';
-const MAX_OUT_EDGE = 1600;
-const DETECT_INTERVAL_MS = 220;
-const DETECT_WIDTH = 480;
-
-let cvPromise = null;
-function loadOpenCV() {
-    if (cvPromise) return cvPromise;
-    cvPromise = new Promise((resolve) => {
-        if (window.cv && window.cv.Mat) return resolve(window.cv);
-        const script = document.createElement('script');
-        script.src = OPENCV_URL;
-        script.async = true;
-        let settled = false;
-        const done = (v) => { if (!settled) { settled = true; resolve(v); } };
-        script.onload = () => {
-            const cv = window.cv;
-            if (!cv) return done(null);
-            if (cv.Mat) return done(cv);
-            if (typeof cv.then === 'function') { cv.then((c) => { window.cv = c; done(c); }); return; }
-            cv.onRuntimeInitialized = () => done(window.cv);
-        };
-        script.onerror = () => done(null);
-        document.head.appendChild(script);
-        setTimeout(() => done(window.cv && window.cv.Mat ? window.cv : null), 8000);
-    });
-    return cvPromise;
-}
+const MAX_OUT_EDGE = 1500;
 
 export function openScanner() {
     return new Promise((resolve, reject) => {
         const pages = [];
-        let stream = null, track = null, torchOn = false;
-        let cv = null, detecting = false;
-        let detectTimer = null, rafId = null;
-        let latestQuad = null;          // video-pixel coords
-        let stableCount = 0, lastCentroid = null;
-        let autoMode = true;
-        let mode = 'live';
-        let originalImageData = null;
-        let videoReady = false, cvTried = false;
+        let stream = null, track = null, torchOn = false, videoReady = false;
+        let mode = 'live';                 // 'live' | 'crop' | 'review'
+        let captured = null;               // full-res captured canvas
+        let corners = null;                // [tl,tr,br,bl] in captured-image px
+        let originalImageData = null;      // cropped image data for filters
+        let dragIdx = -1;
         const cleanupHooks = [];
 
         const root = document.createElement('div');
@@ -62,230 +30,171 @@ export function openScanner() {
                 <span class="spacer"></span>
                 <button class="scan-side-btn" data-act="torch" aria-label="Flash">⚡</button>
             </div>
+
+            <!-- LIVE -->
             <video autoplay playsinline muted></video>
-            <canvas class="overlay"></canvas>
-            <div class="hitlayer"></div>
-            <canvas class="preview hidden"></canvas>
+            <div class="hitlayer live-only"></div>
             <button class="tap-start hidden" data-act="start">▶<span>Tap to start camera</span></button>
 
+            <!-- CROP -->
+            <canvas class="crop-img hidden"></canvas>
+            <svg class="crop-svg hidden" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+                <polygon class="crop-poly" points=""></polygon>
+                <circle class="ch" data-i="0" r="0"></circle>
+                <circle class="ch" data-i="1" r="0"></circle>
+                <circle class="ch" data-i="2" r="0"></circle>
+                <circle class="ch" data-i="3" r="0"></circle>
+            </svg>
+
+            <!-- REVIEW -->
+            <canvas class="preview hidden"></canvas>
             <div class="filter-bar review hidden">
                 <button class="filter-chip" data-filter="original">Original</button>
                 <button class="filter-chip active" data-filter="color">Color</button>
                 <button class="filter-chip" data-filter="bw">B&amp;W</button>
             </div>
 
-            <div class="scan-controls live">
-                <button class="scan-side-btn" data-act="auto" title="Auto capture">A</button>
+            <!-- CONTROLS -->
+            <div class="scan-controls c-live">
+                <span style="width:52px"></span>
                 <button class="shutter" data-act="capture" aria-label="Capture"></button>
                 <button class="scan-side-btn" data-act="done" title="Done">✓<span class="count"></span></button>
             </div>
-            <div class="scan-controls review hidden">
+            <div class="scan-controls c-crop hidden">
                 <button class="scan-side-btn" data-act="retake" title="Retake">↺</button>
+                <button class="btn-pill" data-act="crop">Crop</button>
+                <button class="scan-side-btn" data-act="full" title="Use full photo">▢</button>
+            </div>
+            <div class="scan-controls c-review hidden">
+                <button class="scan-side-btn" data-act="recrop" title="Adjust crop">✎</button>
                 <button class="shutter" data-act="keep" aria-label="Keep" style="background:#1a7f37;border-color:#fff"></button>
                 <span style="width:52px"></span>
-            </div>
-            <div class="scan-debug" id="scan-debug"></div>`;
+            </div>`;
         document.getElementById('modal-root').appendChild(root);
 
-        const video = root.querySelector('video');
-        const overlay = root.querySelector('canvas.overlay');
-        const octx = overlay.getContext('2d');
-        const review = root.querySelector('canvas.preview');
+        const $ = (s) => root.querySelector(s);
+        const video = $('video');
+        const hit = $('.hitlayer');
+        const cropImg = $('.crop-img');
+        const cropCtx = cropImg.getContext('2d');
+        const svg = $('.crop-svg');
+        const poly = $('.crop-poly');
+        const handles = [...root.querySelectorAll('circle.ch')];
+        const review = $('.preview');
         const rctx = review.getContext('2d', { willReadFrequently: true });
-        const det = document.createElement('canvas');
-        const dctx = det.getContext('2d', { willReadFrequently: true });
-        const full = document.createElement('canvas');
-        const fctx = full.getContext('2d');
-        const statusEl = root.querySelector('#scan-status');
-
+        const statusEl = $('#scan-status');
         const setStatus = (t) => { statusEl.textContent = t; };
-        const show = (sel, on) => root.querySelectorAll(sel).forEach(e => e.classList.toggle('hidden', !on));
+        const showEl = (sel, on) => root.querySelectorAll(sel).forEach(e => e.classList.toggle('hidden', !on));
         const updateCount = () => { root.querySelector('.count').textContent = pages.length ? ` ${pages.length}` : ''; };
-        const setAutoBtn = () => root.querySelector('[data-act=auto]').classList.toggle('active', autoMode);
 
-        function sizeOverlay() {
-            const dpr = Math.min(window.devicePixelRatio || 1, 2);
-            overlay.width = Math.round(overlay.clientWidth * dpr);
-            overlay.height = Math.round(overlay.clientHeight * dpr);
-            octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        function setMode(m) {
+            mode = m;
+            showEl('video, .hitlayer', m === 'live');
+            showEl('.crop-img, .crop-svg', m === 'crop');
+            showEl('.preview, .filter-bar.review', m === 'review');
+            showEl('.c-live', m === 'live');
+            showEl('.c-crop', m === 'crop');
+            showEl('.c-review', m === 'review');
         }
 
-        // Cover-fit mapping: video-pixel coords → overlay CSS-px coords.
-        function cover() {
-            const ew = overlay.clientWidth, eh = overlay.clientHeight;
-            const vw = video.videoWidth, vh = video.videoHeight;
-            if (!vw || !vh) return null;
-            const scale = Math.max(ew / vw, eh / vh);
-            return { scale, dx: (ew - vw * scale) / 2, dy: (eh - vh * scale) / 2, vw, vh, ew, eh };
-        }
-
+        // ---------- camera ----------
+        function tryPlay() { video.muted = true; video.playsInline = true; const p = video.play(); if (p && p.catch) p.catch(() => {}); }
         function cleanup(result) {
-            if (detectTimer) clearInterval(detectTimer);
-            if (rafId) cancelAnimationFrame(rafId);
             if (stream) stream.getTracks().forEach(t => t.stop());
-            window.removeEventListener('resize', sizeOverlay);
+            window.removeEventListener('resize', onResize);
             cleanupHooks.forEach(fn => { try { fn(); } catch (_) {} });
             root.remove();
             resolve(result);
         }
-
-        function refreshStatus() {
-            if (mode !== 'live') return;
-            if (!videoReady) { setStatus('Starting camera…'); return; }
-            if (!cvTried) { setStatus('Tap to capture · loading auto-detect…'); return; }
-            if (!cv) { setStatus('Tap anywhere to capture'); return; }
-            setStatus(autoMode ? 'Point at a document' : 'Tap to capture');
-        }
-
-        const tapStartBtn = () => root.querySelector('.tap-start');
-        function tryPlay() {
-            video.muted = true; video.playsInline = true;
-            const p = video.play();
-            if (p && p.catch) p.catch(() => {});
-        }
-        function showTapStart(on) { tapStartBtn().classList.toggle('hidden', !on); }
+        function onResize() { if (mode === 'crop') drawCrop(); }
 
         async function start() {
-            setAutoBtn();
             updateCount();
             setStatus('Starting camera…');
-
-            // Load OpenCV in the background — never blocks the camera or capture.
-            loadOpenCV().then((c) => { cv = c; cvTried = true; refreshStatus(); });
-
-            // Mark ready as soon as the stream produces frames.
-            const onPlaying = () => { videoReady = true; showTapStart(false); sizeOverlay(); refreshStatus(); };
-            video.addEventListener('loadedmetadata', () => { sizeOverlay(); tryPlay(); });
+            const onPlaying = () => { videoReady = true; showEl('.tap-start', false); setStatus('Tap the shutter to capture'); };
             video.addEventListener('playing', onPlaying);
             video.addEventListener('canplay', () => { tryPlay(); if (video.videoWidth) onPlaying(); });
-
+            video.addEventListener('loadedmetadata', tryPlay);
             try {
-                stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: { ideal: 'environment' } },
-                    audio: false,
-                });
+                stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
                 video.srcObject = stream;
                 track = stream.getVideoTracks()[0];
-                tryPlay(); // awaiting getUserMedia consumed the tap's user-activation…
-                rafId = requestAnimationFrame(drawOverlay);
-                detectTimer = setInterval(tick, DETECT_INTERVAL_MS);
-
-                // …so if autoplay is blocked and no frames arrive shortly, reveal an
-                // explicit "Tap to start" button (a fresh user gesture reliably plays).
-                setTimeout(() => {
-                    if (!videoReady && mode === 'live') {
-                        showTapStart(true);
-                        setStatus('Tap “Start camera” below');
-                    }
-                }, 1200);
-            } catch (err) {
-                root.remove();
-                reject(err);
-            }
+                tryPlay();
+                setTimeout(() => { if (!videoReady && mode === 'live') { showEl('.tap-start', true); setStatus('Tap “Start camera”'); } }, 1200);
+            } catch (err) { root.remove(); reject(err); }
         }
 
-        // rAF only clears + redraws the (cheap) outline; no video pixels touched.
-        function drawOverlay() {
-            rafId = requestAnimationFrame(drawOverlay);
-            if (mode !== 'live') return;
-            octx.clearRect(0, 0, overlay.clientWidth, overlay.clientHeight);
-            const m = cover();
-            if (!m || !latestQuad) return;
-            const pts = latestQuad.map(p => ({ x: m.dx + p.x * m.scale, y: m.dy + p.y * m.scale }));
-            octx.lineWidth = 3;
-            octx.strokeStyle = '#4ade80';
-            octx.fillStyle = 'rgba(74,222,128,0.15)';
-            octx.beginPath();
-            pts.forEach((p, i) => i ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y));
-            octx.closePath();
-            octx.fill(); octx.stroke();
-        }
-
-        // Throttled, guarded detection. Runs at most once per interval and never
-        // overlaps itself, so a slow frame can't pile up and hang the page.
-        function tick() {
-            if (mode !== 'live' || !cv || detecting) return;
-            const vw = video.videoWidth, vh = video.videoHeight;
-            if (!vw || !vh) return;
-            detecting = true;
-            try {
-                const dw = DETECT_WIDTH, dh = Math.max(1, Math.round(dw * vh / vw));
-                det.width = dw; det.height = dh;
-                dctx.drawImage(video, 0, 0, dw, dh);
-                const quad = detectDocument(cv, det);
-                if (quad) {
-                    const sx = vw / dw, sy = vh / dh;
-                    const q = quad.map(p => ({ x: p.x * sx, y: p.y * sy }));
-                    const c = centroid(q);
-                    if (lastCentroid && dist(c, lastCentroid) < vw * 0.035) stableCount++;
-                    else stableCount = 0;
-                    lastCentroid = c; latestQuad = q;
-                    if (autoMode && stableCount >= 5) { stableCount = 0; capture(); }
-                    else setStatus(autoMode ? 'Hold steady…' : 'Detected — tap shutter');
-                } else {
-                    latestQuad = null; stableCount = 0; lastCentroid = null;
-                    setStatus('Searching for document…');
-                }
-            } catch (_) {
-                cv = null; // disable detection on error; manual capture still works
-                setStatus('Tap the shutter to capture');
-            } finally {
-                detecting = false;
-            }
-        }
-
+        // ---------- capture → crop ----------
         function capture() {
-          try {
             const vw = video.videoWidth, vh = video.videoHeight;
-            if (!vw || !vh) { setStatus('Camera not ready yet — one moment…'); return; }
-            full.width = vw; full.height = vh;
-            fctx.drawImage(video, 0, 0, vw, vh);
-
-            let outCanvas = full;
-            if (cv && latestQuad) {
-                try { outCanvas = warpPerspectiveCanvas(cv, full, latestQuad); } catch (_) { outCanvas = full; }
-            }
-            let w = outCanvas.width, h = outCanvas.height;
-            const longest = Math.max(w, h);
-            if (longest > MAX_OUT_EDGE) { const s = MAX_OUT_EDGE / longest; w = Math.round(w * s); h = Math.round(h * s); }
-            review.width = w; review.height = h;
-            rctx.drawImage(outCanvas, 0, 0, w, h);
-            originalImageData = rctx.getImageData(0, 0, w, h);
-
-            mode = 'review';
-            octx.clearRect(0, 0, overlay.clientWidth, overlay.clientHeight);
-            applyFilter('color');
-            review.classList.remove('hidden');
-            overlay.classList.add('hidden');
-            video.classList.add('hidden');
-            show('.scan-controls.live', false);
-            show('.filter-bar.review', true);
-            show('.scan-controls.review', true);
-            root.querySelectorAll('.filter-chip').forEach(c => c.classList.toggle('active', c.dataset.filter === 'color'));
-            setStatus(cv && latestQuad ? 'Cropped & enhanced' : 'Captured');
-          } catch (err) {
-            setStatus('Capture failed: ' + ((err && err.message) || err));
-          }
+            if (!vw || !vh) { setStatus('Camera not ready yet…'); return; }
+            captured = document.createElement('canvas');
+            captured.width = vw; captured.height = vh;
+            captured.getContext('2d').drawImage(video, 0, 0, vw, vh);
+            corners = detectCorners(captured);
+            enterCrop();
         }
 
-        function backToLive() {
-            mode = 'live';
-            latestQuad = null; stableCount = 0; lastCentroid = null;
-            review.classList.add('hidden');
-            overlay.classList.remove('hidden');
-            video.classList.remove('hidden');
-            show('.scan-controls.live', true);
-            show('.filter-bar.review', false);
-            show('.scan-controls.review', false);
-            refreshStatus();
+        function enterCrop() {
+            setStatus('Drag the corners to the document, then Crop');
+            cropImg.width = captured.width; cropImg.height = captured.height;
+            cropCtx.drawImage(captured, 0, 0);
+            svg.setAttribute('viewBox', `0 0 ${captured.width} ${captured.height}`);
+            const r = Math.max(captured.width, captured.height) * 0.03;
+            handles.forEach(h => h.setAttribute('r', r));
+            setMode('crop');
+            drawCrop();
+        }
+
+        function drawCrop() {
+            poly.setAttribute('points', corners.map(p => `${p.x},${p.y}`).join(' '));
+            handles.forEach((h, i) => { h.setAttribute('cx', corners[i].x); h.setAttribute('cy', corners[i].y); });
+        }
+
+        function svgPoint(e) {
+            const p = svg.createSVGPoint();
+            p.x = e.clientX; p.y = e.clientY;
+            const m = svg.getScreenCTM();
+            return m ? p.matrixTransform(m.inverse()) : { x: 0, y: 0 };
+        }
+        handles.forEach((h) => {
+            h.addEventListener('pointerdown', (e) => {
+                e.preventDefault();
+                dragIdx = +h.dataset.i;
+                try { h.setPointerCapture(e.pointerId); } catch (_) {}
+            });
+            h.addEventListener('pointermove', (e) => {
+                if (dragIdx < 0) return;
+                const p = svgPoint(e);
+                corners[dragIdx] = {
+                    x: Math.max(0, Math.min(captured.width, p.x)),
+                    y: Math.max(0, Math.min(captured.height, p.y)),
+                };
+                drawCrop();
+            });
+            const end = () => { dragIdx = -1; };
+            h.addEventListener('pointerup', end);
+            h.addEventListener('pointercancel', end);
+        });
+
+        function doCrop(useFull) {
+            const quad = useFull
+                ? [{ x: 0, y: 0 }, { x: captured.width, y: 0 }, { x: captured.width, y: captured.height }, { x: 0, y: captured.height }]
+                : orderPoints(corners);
+            const out = warp(captured, quad);
+            review.width = out.width; review.height = out.height;
+            rctx.drawImage(out, 0, 0);
+            originalImageData = rctx.getImageData(0, 0, out.width, out.height);
+            applyFilter('color');
+            root.querySelectorAll('.filter-chip').forEach(c => c.classList.toggle('active', c.dataset.filter === 'color'));
+            setMode('review');
+            setStatus('Choose a filter, then keep');
         }
 
         function keep() {
-            review.toBlob((blob) => {
-                if (blob) { pages.push(blob); updateCount(); }
-                backToLive();
-            }, 'image/jpeg', 0.85);
+            review.toBlob((blob) => { if (blob) { pages.push(blob); updateCount(); } backToLive(); }, 'image/jpeg', 0.85);
         }
+        function backToLive() { captured = null; corners = null; setMode('live'); setStatus(videoReady ? 'Tap the shutter to capture' : 'Starting camera…'); }
 
         function applyFilter(kind) {
             if (!originalImageData) return;
@@ -305,107 +214,46 @@ export function openScanner() {
                 torchOn = !torchOn;
                 await track.applyConstraints({ advanced: [{ torch: torchOn }] });
                 root.querySelector('[data-act=torch]').classList.toggle('active', torchOn);
-            } catch (_) { /* ignore */ }
+            } catch (_) {}
         }
 
+        // ---------- input wiring (direct, per-element) ----------
         function actOn(act) {
             switch (act) {
                 case 'start': tryPlay(); break;
                 case 'capture': if (mode === 'live') capture(); break;
-                case 'keep': keep(); break;
+                case 'crop': if (mode === 'crop') doCrop(false); break;
+                case 'full': if (mode === 'crop') doCrop(true); break;
+                case 'recrop': if (mode === 'review') enterCrop(); break;
                 case 'retake': backToLive(); break;
-                case 'auto': autoMode = !autoMode; setAutoBtn(); break;
+                case 'keep': if (mode === 'review') keep(); break;
                 case 'torch': toggleTorch(); break;
                 case 'done':
                 case 'close': cleanup(pages); break;
             }
         }
-
-        // Direct, per-element handlers (no reliance on event delegation). Each
-        // element listens for both pointerup and click with its OWN debounce, so
-        // the synthetic click that follows a touch doesn't double-fire, while a
-        // tap on one control never blocks a tap on another (the earlier bug).
         function bind(el, fn) {
             if (!el) return;
             let last = 0;
-            const g = (e) => {
-                const now = Date.now();
-                if (now - last < 400) return;
-                last = now;
-                if (e && e.cancelable) e.preventDefault();
-                fn(e);
-            };
+            const g = (e) => { const n = Date.now(); if (n - last < 400) return; last = n; if (e.cancelable) e.preventDefault(); fn(e); };
             el.addEventListener('pointerup', g);
             el.addEventListener('click', g);
         }
-
-        root.querySelectorAll('[data-act]').forEach(btn => bind(btn, () => actOn(btn.dataset.act)));
-        root.querySelectorAll('[data-filter]').forEach(chip => bind(chip, () => {
-            root.querySelectorAll('.filter-chip').forEach(c => c.classList.toggle('active', c === chip));
-            applyFilter(chip.dataset.filter);
+        root.querySelectorAll('[data-act]').forEach(b => bind(b, () => actOn(b.dataset.act)));
+        root.querySelectorAll('[data-filter]').forEach(c => bind(c, () => {
+            root.querySelectorAll('.filter-chip').forEach(x => x.classList.toggle('active', x === c));
+            applyFilter(c.dataset.filter);
         }));
-        // Full-area layer above the video: tap to start (if not playing) or capture.
-        bind(root.querySelector('.hitlayer'), () => {
-            if (mode !== 'live') return;
-            if (!videoReady) { tryPlay(); return; }
-            capture();
-        });
+        bind(hit, () => { if (mode !== 'live') return; if (!videoReady) tryPlay(); else capture(); });
 
-        // Always-on tap readout (capture phase, document level) so we can see the
-        // real element under each tap even if something is intercepting events.
-        const dbgHandler = (e) => {
-            const dbg = root.querySelector('#scan-debug');
-            if (!dbg) return;
-            const t = e.target;
-            dbg.textContent = 'tap ▸ ' + (t.tagName || '?').toLowerCase()
-                + (t.className && t.className.toString ? '.' + t.className.toString().split(' ')[0] : '')
-                + ' · ready=' + videoReady;
-        };
-        document.addEventListener('pointerdown', dbgHandler, true);
-        cleanupHooks.push(() => document.removeEventListener('pointerdown', dbgHandler, true));
-
-        window.addEventListener('resize', sizeOverlay);
+        setMode('live');
+        window.addEventListener('resize', onResize);
         start();
     });
 }
 
-// ---------- OpenCV document detection & warp ----------
-
-function detectDocument(cv, srcCanvas) {
-    const src = cv.imread(srcCanvas);
-    const gray = new cv.Mat(), edges = new cv.Mat();
-    const contours = new cv.MatVector(), hier = new cv.Mat();
-    let best = null, bestArea = 0;
-    try {
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-        cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0);
-        cv.Canny(gray, edges, 75, 200);
-        const kernel = cv.Mat.ones(3, 3, cv.CV_8U);
-        cv.dilate(edges, edges, kernel);
-        kernel.delete();
-        cv.findContours(edges, contours, hier, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
-        const imgArea = srcCanvas.width * srcCanvas.height;
-        for (let i = 0; i < contours.size(); i++) {
-            const cnt = contours.get(i);
-            const area = cv.contourArea(cnt);
-            if (area > 0.2 * imgArea && area > bestArea) {
-                const peri = cv.arcLength(cnt, true);
-                const approx = new cv.Mat();
-                cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-                if (approx.rows === 4 && cv.isContourConvex(approx)) {
-                    bestArea = area;
-                    best = [];
-                    for (let k = 0; k < 4; k++) best.push({ x: approx.data32S[k * 2], y: approx.data32S[k * 2 + 1] });
-                }
-                approx.delete();
-            }
-            cnt.delete();
-        }
-    } finally {
-        src.delete(); gray.delete(); edges.delete(); contours.delete(); hier.delete();
-    }
-    return best;
-}
+// ---------- geometry / warp (pure JS) ----------
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
 function orderPoints(pts) {
     const bySum = [...pts].sort((a, b) => (a.x + a.y) - (b.x + b.y));
@@ -413,36 +261,134 @@ function orderPoints(pts) {
     return [bySum[0], byDiff[0], bySum[3], byDiff[3]]; // tl, tr, br, bl
 }
 
-function warpPerspectiveCanvas(cv, srcCanvas, quad) {
-    const [tl, tr, br, bl] = orderPoints(quad);
-    const wA = Math.hypot(br.x - bl.x, br.y - bl.y), wB = Math.hypot(tr.x - tl.x, tr.y - tl.y);
-    const hA = Math.hypot(tr.x - br.x, tr.y - br.y), hB = Math.hypot(tl.x - bl.x, tl.y - bl.y);
-    const W = Math.max(1, Math.round(Math.max(wA, wB)));
-    const H = Math.max(1, Math.round(Math.max(hA, hB)));
-    const src = cv.imread(srcCanvas);
-    const dst = new cv.Mat();
-    const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y]);
-    const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, W, 0, W, H, 0, H]);
-    const M = cv.getPerspectiveTransform(srcTri, dstTri);
-    cv.warpPerspective(src, dst, M, new cv.Size(W, H), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
-    const out = document.createElement('canvas');
-    out.width = W; out.height = H;
-    cv.imshow(out, dst);
-    src.delete(); dst.delete(); M.delete(); srcTri.delete(); dstTri.delete();
+// Solve 8-param homography mapping the 4 `from` points to the 4 `to` points.
+function solveHomography(from, to) {
+    const A = [], b = [];
+    for (let i = 0; i < 4; i++) {
+        const { x, y } = from[i], X = to[i].x, Y = to[i].y;
+        A.push([x, y, 1, 0, 0, 0, -X * x, -X * y]); b.push(X);
+        A.push([0, 0, 0, x, y, 1, -Y * x, -Y * y]); b.push(Y);
+    }
+    const h = gauss(A, b);
+    return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+}
+function gauss(A, b) {
+    const n = 8;
+    for (let i = 0; i < n; i++) {
+        let max = i;
+        for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[max][i])) max = r;
+        [A[i], A[max]] = [A[max], A[i]]; [b[i], b[max]] = [b[max], b[i]];
+        const piv = A[i][i] || 1e-9;
+        for (let r = 0; r < n; r++) {
+            if (r === i) continue;
+            const f = A[r][i] / piv;
+            for (let c = i; c < n; c++) A[r][c] -= f * A[i][c];
+            b[r] -= f * b[i];
+        }
+    }
+    const x = new Array(n);
+    for (let i = 0; i < n; i++) x[i] = b[i] / (A[i][i] || 1e-9);
+    return x;
+}
+function applyH(H, x, y) { const d = H[6] * x + H[7] * y + H[8]; return { x: (H[0] * x + H[1] * y + H[2]) / d, y: (H[3] * x + H[4] * y + H[5]) / d }; }
+
+function warp(srcCanvas, quad) {
+    const [tl, tr, br, bl] = quad;
+    let W = Math.round(Math.max(dist(br, bl), dist(tr, tl)));
+    let H = Math.round(Math.max(dist(tr, br), dist(tl, bl)));
+    const longest = Math.max(W, H);
+    if (longest > MAX_OUT_EDGE) { const s = MAX_OUT_EDGE / longest; W = Math.round(W * s); H = Math.round(H * s); }
+    W = Math.max(1, W); H = Math.max(1, H);
+    const dst = [{ x: 0, y: 0 }, { x: W, y: 0 }, { x: W, y: H }, { x: 0, y: H }];
+    const Hom = solveHomography(dst, quad); // output(dst) → source(quad)
+
+    const sctx = srcCanvas.getContext('2d');
+    const s = sctx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
+    const sd = s.data, sw = s.width, sh = s.height;
+    const out = document.createElement('canvas'); out.width = W; out.height = H;
+    const octx = out.getContext('2d');
+    const o = octx.createImageData(W, H), od = o.data;
+    for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+            const p = applyH(Hom, x + 0.5, y + 0.5);
+            let fx = p.x, fy = p.y;
+            if (fx < 0) fx = 0; else if (fx > sw - 1) fx = sw - 1;
+            if (fy < 0) fy = 0; else if (fy > sh - 1) fy = sh - 1;
+            const x0 = fx | 0, y0 = fy | 0, x1 = Math.min(x0 + 1, sw - 1), y1 = Math.min(y0 + 1, sh - 1);
+            const ax = fx - x0, ay = fy - y0;
+            const i00 = (y0 * sw + x0) * 4, i10 = (y0 * sw + x1) * 4, i01 = (y1 * sw + x0) * 4, i11 = (y1 * sw + x1) * 4;
+            const oi = (y * W + x) * 4;
+            for (let c = 0; c < 3; c++) {
+                const top = sd[i00 + c] * (1 - ax) + sd[i10 + c] * ax;
+                const bot = sd[i01 + c] * (1 - ax) + sd[i11 + c] * ax;
+                od[oi + c] = top * (1 - ay) + bot * ay;
+            }
+            od[oi + 3] = 255;
+        }
+    }
+    octx.putImageData(o, 0, 0);
     return out;
 }
 
-const centroid = (q) => ({ x: (q[0].x + q[1].x + q[2].x + q[3].x) / 4, y: (q[0].y + q[1].y + q[2].y + q[3].y) / 4 });
-const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+// ---------- lightweight edge-based corner guess (best effort) ----------
+function detectCorners(canvas) {
+    const W = canvas.width, H = canvas.height;
+    // default: 7% inset rectangle
+    const def = [
+        { x: W * 0.07, y: H * 0.07 }, { x: W * 0.93, y: H * 0.07 },
+        { x: W * 0.93, y: H * 0.93 }, { x: W * 0.07, y: H * 0.93 },
+    ];
+    try {
+        const dw = 240, dh = Math.max(1, Math.round(dw * H / W));
+        const tmp = document.createElement('canvas'); tmp.width = dw; tmp.height = dh;
+        tmp.getContext('2d').drawImage(canvas, 0, 0, dw, dh);
+        const d = tmp.getContext('2d').getImageData(0, 0, dw, dh).data;
+        const gray = new Float32Array(dw * dh);
+        for (let i = 0, g = 0; i < d.length; i += 4, g++) gray[g] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+        // Sobel magnitude, collect strong edge points
+        const pts = [];
+        let sum = 0, cnt = 0;
+        const mag = new Float32Array(dw * dh);
+        for (let y = 1; y < dh - 1; y++) {
+            for (let x = 1; x < dw - 1; x++) {
+                const i = y * dw + x;
+                const gx = -gray[i - dw - 1] - 2 * gray[i - 1] - gray[i + dw - 1] + gray[i - dw + 1] + 2 * gray[i + 1] + gray[i + dw + 1];
+                const gy = -gray[i - dw - 1] - 2 * gray[i - dw] - gray[i - dw + 1] + gray[i + dw - 1] + 2 * gray[i + dw] + gray[i + dw + 1];
+                const m = Math.abs(gx) + Math.abs(gy);
+                mag[i] = m; sum += m; cnt++;
+            }
+        }
+        const thr = (sum / cnt) * 2.2;
+        for (let y = 1; y < dh - 1; y++) for (let x = 1; x < dw - 1; x++) if (mag[y * dw + x] > thr) pts.push({ x, y });
+        if (pts.length < 40) return def;
+        // Extreme points by the four corner-affinity functions (x+y, x-y, etc.)
+        let tl = pts[0], tr = pts[0], br = pts[0], bl = pts[0];
+        for (const p of pts) {
+            if (p.x + p.y < tl.x + tl.y) tl = p;
+            if (p.x - p.y > tr.x - tr.y) tr = p;
+            if (p.x + p.y > br.x + br.y) br = p;
+            if (p.x - p.y < bl.x - bl.y) bl = p;
+        }
+        const sx = W / dw, sy = H / dh;
+        const scaled = [tl, tr, br, bl].map(p => ({ x: p.x * sx, y: p.y * sy }));
+        // sanity: area must be a decent fraction of the frame, else fall back
+        const area = quadArea(scaled);
+        if (area < 0.18 * W * H) return def;
+        return scaled;
+    } catch (_) {
+        return def;
+    }
+}
+function quadArea(q) {
+    let a = 0;
+    for (let i = 0; i < 4; i++) { const p = q[i], n = q[(i + 1) % 4]; a += p.x * n.y - n.x * p.y; }
+    return Math.abs(a) / 2;
+}
 
 // ---------- enhancement filters ----------
-
 function autoContrast(src, dst) {
     const hist = new Uint32Array(256);
-    for (let i = 0; i < src.length; i += 4) {
-        const lum = (src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114) | 0;
-        hist[lum]++;
-    }
+    for (let i = 0; i < src.length; i += 4) { const l = (src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114) | 0; hist[l]++; }
     const total = src.length / 4;
     let lo = 0, hi = 255, acc = 0;
     for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc > total * 0.02) { lo = i; break; } }
@@ -450,37 +396,23 @@ function autoContrast(src, dst) {
     for (let i = 255; i >= 0; i--) { acc += hist[i]; if (acc > total * 0.02) { hi = i; break; } }
     const range = Math.max(1, hi - lo);
     for (let i = 0; i < src.length; i += 4) {
-        for (let c = 0; c < 3; c++) {
-            let v = (src[i + c] - lo) * 255 / range;
-            dst[i + c] = v < 0 ? 0 : v > 255 ? 255 : v;
-        }
+        for (let c = 0; c < 3; c++) { let v = (src[i + c] - lo) * 255 / range; dst[i + c] = v < 0 ? 0 : v > 255 ? 255 : v; }
         dst[i + 3] = 255;
     }
 }
-
 function grayscaleOtsu(src, dst) {
     const n = src.length / 4;
-    const gray = new Uint8ClampedArray(n);
-    const hist = new Uint32Array(256);
-    for (let i = 0, g = 0; i < src.length; i += 4, g++) {
-        const v = (src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114) | 0;
-        gray[g] = v; hist[v]++;
-    }
-    let sum = 0;
-    for (let i = 0; i < 256; i++) sum += i * hist[i];
-    let sumB = 0, wB = 0, maxVar = 0, threshold = 127;
+    const gray = new Uint8ClampedArray(n), hist = new Uint32Array(256);
+    for (let i = 0, g = 0; i < src.length; i += 4, g++) { const v = (src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114) | 0; gray[g] = v; hist[v]++; }
+    let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let sumB = 0, wB = 0, maxVar = 0, thr = 127;
     for (let i = 0; i < 256; i++) {
-        wB += hist[i];
-        if (wB === 0) continue;
-        const wF = n - wB;
-        if (wF === 0) break;
+        wB += hist[i]; if (!wB) continue;
+        const wF = n - wB; if (!wF) break;
         sumB += i * hist[i];
         const mB = sumB / wB, mF = (sum - sumB) / wF;
         const between = wB * wF * (mB - mF) * (mB - mF);
-        if (between > maxVar) { maxVar = between; threshold = i; }
+        if (between > maxVar) { maxVar = between; thr = i; }
     }
-    for (let g = 0, i = 0; g < n; g++, i += 4) {
-        const v = gray[g] > threshold ? 255 : 0;
-        dst[i] = dst[i + 1] = dst[i + 2] = v; dst[i + 3] = 255;
-    }
+    for (let g = 0, i = 0; g < n; g++, i += 4) { const v = gray[g] > thr ? 255 : 0; dst[i] = dst[i + 1] = dst[i + 2] = v; dst[i + 3] = 255; }
 }
