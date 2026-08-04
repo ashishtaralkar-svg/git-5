@@ -81,7 +81,8 @@ export function openScanner() {
                 <button class="scan-side-btn" data-act="retake" title="Retake">↺</button>
                 <button class="shutter" data-act="keep" aria-label="Keep" style="background:#1a7f37;border-color:#fff"></button>
                 <span style="width:52px"></span>
-            </div>`;
+            </div>
+            <div class="scan-debug" id="scan-debug"></div>`;
         document.getElementById('modal-root').appendChild(root);
 
         const video = root.querySelector('video');
@@ -304,9 +305,18 @@ export function openScanner() {
             } catch (_) { /* ignore */ }
         }
 
-        root.addEventListener('click', (e) => {
+        let lastHandled = 0;
+        function onTap(e) {
+            // Debounce so a touch that also emits a synthetic click doesn't double-fire.
+            const now = Date.now();
+            if (now - lastHandled < 350) return;
+            lastHandled = now;
+
             const act = e.target.closest('[data-act]')?.dataset.act;
             const chip = e.target.closest('[data-filter]');
+            const dbg = root.querySelector('#scan-debug');
+            if (dbg) dbg.textContent = 'tap: ' + e.type + ' · ' + (e.target.tagName || '?').toLowerCase()
+                + (act ? ' · act=' + act : '') + ' · ready=' + videoReady;
             if (chip) {
                 root.querySelectorAll('.filter-chip').forEach(c => c.classList.toggle('active', c === chip));
                 applyFilter(chip.dataset.filter);
@@ -327,7 +337,10 @@ export function openScanner() {
                 case 'done':
                 case 'close': cleanup(pages); break;
             }
-        });
+        }
+        // pointerup fires reliably on touch; click is the fallback for mouse.
+        root.addEventListener('pointerup', onTap);
+        root.addEventListener('click', onTap);
 
         window.addEventListener('resize', sizeOverlay);
         start();
