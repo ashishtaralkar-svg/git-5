@@ -34,7 +34,7 @@ function loadOpenCV() {
         };
         script.onerror = () => done(null);
         document.head.appendChild(script);
-        setTimeout(() => done(window.cv && window.cv.Mat ? window.cv : null), 12000);
+        setTimeout(() => done(window.cv && window.cv.Mat ? window.cv : null), 8000);
     });
     return cvPromise;
 }
@@ -231,6 +231,7 @@ export function openScanner() {
         }
 
         function capture() {
+          try {
             const vw = video.videoWidth, vh = video.videoHeight;
             if (!vw || !vh) { setStatus('Camera not ready yet — one moment…'); return; }
             full.width = vw; full.height = vh;
@@ -258,6 +259,9 @@ export function openScanner() {
             show('.scan-controls.review', true);
             root.querySelectorAll('.filter-chip').forEach(c => c.classList.toggle('active', c.dataset.filter === 'color'));
             setStatus(cv && latestQuad ? 'Cropped & enhanced' : 'Captured');
+          } catch (err) {
+            setStatus('Capture failed: ' + ((err && err.message) || err));
+          }
         }
 
         function backToLive() {
@@ -310,8 +314,9 @@ export function openScanner() {
             }
             // Before the stream is playing, any tap forces playback (user gesture).
             if (mode === 'live' && !videoReady) { tryPlay(); return; }
-            // Once live, tap anywhere on the preview to capture (large, forgiving target).
-            if (!act && mode === 'live' && (e.target === video || e.target === overlay)) { capture(); return; }
+            // Once live, a tap anywhere except the buttons captures (forgiving target).
+            const onControl = e.target.closest('.scan-controls, .scan-topbar, .filter-bar, .tap-start');
+            if (mode === 'live' && !act && !chip && !onControl) { capture(); return; }
             switch (act) {
                 case 'start': tryPlay(); break;
                 case 'capture': if (mode === 'live') capture(); break;
