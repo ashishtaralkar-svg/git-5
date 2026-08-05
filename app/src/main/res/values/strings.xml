@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HDFC DocUpload</string>
+
+    <!-- Login -->
+    <string name="login_title">Welcome Back</string>
+    <string name="login_subtitle">Sign in to continue</string>
+    <string name="username">Username</string>
+    <string name="password">Password</string>
+    <string name="login">Login</string>
+    <string name="error_invalid_credentials">Invalid Username or Password.</string>
+    <string name="error_username_required">Username is required.</string>
+    <string name="error_password_required">Password is required.</string>
+
+    <!-- Search -->
+    <string name="search_title">Search Application</string>
+    <string name="application_number">Application Number</string>
+    <string name="search">Search</string>
+    <string name="error_application_required">Application Number is required.</string>
+    <string name="error_application_alphanumeric">Only alphanumeric characters are allowed.</string>
+
+    <!-- Upload -->
+    <string name="upload_documents">Upload Documents</string>
+    <string name="upload_from_mobile">Upload from Mobile</string>
+    <string name="scan_document">Scan Document</string>
+    <string name="add_more_documents">Add More Documents</string>
+    <string name="back">Back</string>
+    <string name="upload">Upload</string>
+    <string name="remove">Remove</string>
+    <string name="error_min_one_document">Please add at least one document to upload.</string>
+    <string name="upload_success">Documents uploaded successfully.</string>
+    <string name="view_uploaded_documents">View Uploaded Documents</string>
+    <string name="upload_more">Upload More</string>
+
+    <!-- Uploaded list -->
+    <string name="uploaded_documents">Uploaded Documents</string>
+    <string name="delete">Delete</string>
+    <string name="preview">Preview</string>
+
+    <!-- Errors -->
+    <string name="error_camera_unavailable">Camera is unavailable on this device.</string>
+    <string name="error_scan_failed">Document scan failed. Please try again.</string>
+    <string name="error_upload_failed">Upload failed. Documents saved for retry.</string>
+    <string name="error_network_unavailable">No internet connection.</string>
+    <string name="error_permission_denied">Permission denied. Please enable it in settings.</string>
+    <string name="error_unsupported_file">Unsupported file type.</string>
+    <string name="logout">Logout</string>
+</resources>
