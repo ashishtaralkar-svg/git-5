@@ -5,26 +5,41 @@
 // Multi-page: the scanner stays open after each capture (continuous scanning)
 // and we accumulate every accepted page until the user closes it.
 
-// Two independent CDN mirrors for the SDK — if one is unreachable (blocked
-// network, transient CDN issue) the other is tried before giving up.
+// The UMD build (attaches `window.Dynamsoft`), not the ESM build — the ESM
+// build has a bare `import ... from "dynamsoft-capture-vision-bundle"` that
+// only resolves under a bundler/import-map, and fails in a plain browser
+// `import()` with "Failed to resolve module specifier". The UMD build is
+// fully self-contained. Two independent CDN mirrors: if one is unreachable
+// (blocked network, transient CDN issue) the other is tried before giving up.
 const DDS_URLS = [
-    'https://cdn.jsdelivr.net/npm/dynamsoft-document-scanner@1.5.0/dist/dds.bundle.esm.js',
-    'https://unpkg.com/dynamsoft-document-scanner@1.5.0/dist/dds.bundle.esm.js',
+    'https://cdn.jsdelivr.net/npm/dynamsoft-document-scanner@1.5.0/dist/dds.bundle.js',
+    'https://unpkg.com/dynamsoft-document-scanner@1.5.0/dist/dds.bundle.js',
 ];
 
 // Dynamsoft license key (client-side keys are expected — usage is enforced by
 // Dynamsoft's license server, not by keeping this secret).
 const DYNAMSOFT_LICENSE = 'DLS2eyJoYW5kc2hha2VDb2RlIjoiMTA2MDc3MTAxLU1UQTJNRGMzTVRBeExYZGxZaTFVY21saGJGQnliMm8iLCJtYWluU2VydmVyVVJMIjoiaHR0cHM6Ly9tZGxzLmR5bmFtc29mdG9ubGluZS5jb20vIiwib3JnYW5pemF0aW9uSUQiOiIxMDYwNzcxMDEiLCJzdGFuZGJ5U2VydmVyVVJMIjoiaHR0cHM6Ly9zZGxzLmR5bmFtc29mdG9ubGluZS5jb20vIiwiY2hlY2tDb2RlIjoxNDI2NTgzNDU1fQ==';
 
+function loadScript(url) {
+    return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = url;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error(`Failed to load ${url}`));
+        document.head.appendChild(s);
+    });
+}
+
 let DocumentScannerCtor = null;
 async function loadDocumentScanner() {
     if (DocumentScannerCtor) return DocumentScannerCtor;
+    if (window.Dynamsoft?.DocumentScanner) return (DocumentScannerCtor = window.Dynamsoft.DocumentScanner);
     let lastErr;
     for (const url of DDS_URLS) {
         try {
-            const mod = await import(url);
-            DocumentScannerCtor = mod.DocumentScanner;
-            return DocumentScannerCtor;
+            await loadScript(url);
+            if (window.Dynamsoft?.DocumentScanner) return (DocumentScannerCtor = window.Dynamsoft.DocumentScanner);
+            lastErr = new Error(`Loaded ${url} but window.Dynamsoft.DocumentScanner was not found`);
         } catch (err) {
             lastErr = err;
         }
