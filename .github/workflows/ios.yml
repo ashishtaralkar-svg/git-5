@@ -1,0 +1,36 @@
+name: iOS Build Check
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (iOS Simulator, unsigned)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build for iOS Simulator
+        working-directory: ios
+        run: |
+          xcodebuild build \
+            -project DocUpload.xcodeproj \
+            -scheme DocUpload \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
