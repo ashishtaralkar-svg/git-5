@@ -220,75 +220,9 @@ input.error { border-color: var(--error); }
 }
 
 /* ---------- Camera / scanner ---------- */
-.scanner { position: fixed; inset: 0; background: #000; z-index: 90; display: flex; flex-direction: column; touch-action: manipulation; }
-.scanner .scan-debug {
-    position: absolute; left: 10px; bottom: calc(120px + env(safe-area-inset-bottom)); z-index: 5;
-    background: rgba(0,0,0,.6); color: #7CFC00; font: 12px/1.4 monospace; padding: 4px 8px; border-radius: 8px;
-    pointer-events: none; max-width: 80%;
-}
-.scanner video { width: 100%; height: 100%; object-fit: cover; flex: 1; background: #000; }
-.scanner canvas.overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
-.scanner .hitlayer { position: absolute; inset: 0; z-index: 1; background: transparent; }
-.scanner canvas.preview { width: 100%; height: 100%; object-fit: contain; flex: 1; background: #000; }
-.scanner .tap-start {
-    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4;
-    display: flex; flex-direction: column; align-items: center; gap: 8px;
-    background: var(--brand); color: #fff; border: 0; border-radius: 18px;
-    padding: 22px 30px; font-size: 1.5rem; font-weight: 700; cursor: pointer; box-shadow: var(--shadow-lg);
-}
-.scanner .tap-start span { font-size: .95rem; font-weight: 600; }
-
-/* Crop screen */
-.scanner canvas.crop-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; z-index: 1; }
-.scanner svg.crop-svg { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; touch-action: none; }
-.scanner .crop-poly { fill: rgba(74, 222, 128, .12); stroke: #4ade80; stroke-width: 2.5; vector-effect: non-scaling-stroke; }
-.scanner circle.ch { fill: rgba(74, 222, 128, .9); stroke: #fff; stroke-width: 2; vector-effect: non-scaling-stroke; cursor: grab; }
-.scanner .btn-pill {
-    background: var(--brand); color: #fff; border: 0; border-radius: 999px; padding: 14px 34px;
-    font-size: 1.05rem; font-weight: 700; cursor: pointer; box-shadow: var(--shadow);
-}
-.scan-overlay {
-    position: absolute; inset: 0; pointer-events: none;
-    box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .35);
-}
-.scan-frame {
-    position: absolute; inset: 12% 8%; border: 2px solid rgba(255, 255, 255, .85);
-    border-radius: 12px; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .35);
-}
-.scan-frame::before, .scan-frame::after,
-.scan-corners span { content: ""; }
-.scan-topbar {
-    position: absolute; top: 0; left: 0; right: 0; padding: env(safe-area-inset-top) 14px 10px;
-    display: flex; align-items: center; gap: 10px; z-index: 3;
-    background: linear-gradient(rgba(0, 0, 0, .55), transparent);
-}
-.scan-topbar .icon-btn { color: #fff; }
-.scan-topbar .title { font-size: 1rem; color: #fff; }
-.scan-controls {
-    position: absolute; bottom: 0; left: 0; right: 0; padding: 18px 18px calc(18px + env(safe-area-inset-bottom));
-    display: flex; align-items: center; justify-content: space-around; z-index: 3;
-    background: linear-gradient(transparent, rgba(0, 0, 0, .6));
-}
-.shutter {
-    width: 72px; height: 72px; border-radius: 50%; border: 5px solid #fff; background: rgba(255, 255, 255, .25);
-    cursor: pointer; transition: transform .1s;
-}
-.shutter:active { transform: scale(.92); }
-.scan-side-btn {
-    background: rgba(255, 255, 255, .18); border: 0; color: #fff; width: 52px; height: 52px; border-radius: 50%;
-    font-size: 1.3rem; cursor: pointer;
-}
-.scan-side-btn.active { background: #ffd54a; color: #000; }
-
-/* Review filters */
-.filter-bar {
-    position: absolute; bottom: calc(120px + env(safe-area-inset-bottom)); left: 0; right: 0;
-    display: flex; justify-content: center; gap: 10px; z-index: 3;
-}
-.filter-chip {
-    background: rgba(0, 0, 0, .55); color: #fff; border: 1.5px solid transparent; padding: 8px 14px;
-    border-radius: 999px; cursor: pointer; font-size: .85rem; font-weight: 600;
-}
-.filter-chip.active { border-color: #ffd54a; color: #ffd54a; }
+/* The scan UI itself (camera, crop, filters) is rendered by the Dynamsoft
+   Document Scanner widget — see js/scanner.js. #scanner-host is just the
+   full-screen mount point it's given. */
+#scanner-host { background: #000; }
 
 .hidden { display: none !important; }

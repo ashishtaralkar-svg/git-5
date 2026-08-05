@@ -5,13 +5,13 @@ Login → Search Application → Upload Documents → Preview → Upload → Upl
 and adapts the **Scan Document** feature to the device:
 
 - **On a mobile browser:** tapping *Scan Document* opens the device **camera**
-  full-screen with **automatic document detection** — a live green outline
-  tracks the page edges (OpenCV.js), and when the document is held steady it
-  **auto-captures**, then applies **perspective correction + auto-crop** (a
-  four-point warp) to produce a deskewed page, followed by **Original / Color /
-  B&W** enhancement (auto-contrast for Color, Otsu threshold for B&W).
-  Multi-page, torch, retake, and a manual shutter are all available. If
-  OpenCV.js can't load, it degrades gracefully to full-frame capture + filters.
+  full-screen via the **Dynamsoft Document Scanner** widget — it tracks the
+  page edges live, **auto-captures** when the document is held steady, and
+  walks through a correction screen (draggable corners, perspective deskew)
+  and a result screen (Original / Grayscale / B&W / Sepia). It stays open for
+  **multi-page** scanning, accumulating a page each time one is accepted,
+  until the user closes it. If the scanner can't load (e.g. the Dynamsoft CDN
+  is unreachable), the app falls back to the native camera capture input.
 - **On a laptop/desktop browser:** tapping *Scan Document* shows a **popup**
   explaining the scanner is available on mobile devices only. Everything else
   (upload files, preview, upload, uploaded list) still works.
@@ -28,7 +28,9 @@ and adapts the **Scan Document** feature to the device:
 - Offline aware: documents persist in **IndexedDB**; upload is blocked with a
   friendly message when offline (no backend — the demo simulates upload).
 - Material-inspired UI, rounded corners, animations, **light & dark** mode.
-- No build step, no external dependencies — pure HTML/CSS/ES modules.
+- No build step — pure HTML/CSS/ES modules. The one external dependency is the
+  Dynamsoft Document Scanner widget, loaded from its CDN on demand when the
+  scanner is opened (see `js/scanner.js`).
 
 ## Why it's hosted (not opened as a file)
 
