@@ -98,9 +98,8 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
 
-    // Dynamsoft Capture Vision — document boundary detection + perspective
-    // correction, run against still frames captured via CameraX.
-    implementation(libs.dynamsoft.capture.vision.bundle)
+    // ML Kit Document Scanner (Adobe Scan / MS Lens-like experience)
+    implementation(libs.mlkit.document.scanner)
 
     // Networking (placeholder REST layer)
     implementation(libs.retrofit)

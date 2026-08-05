@@ -16,8 +16,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // Dynamsoft Capture Vision (document scanning) — not on Maven Central.
-        maven { url = uri("https://download2.dynamsoft.com/maven/aar") }
     }
 }
 

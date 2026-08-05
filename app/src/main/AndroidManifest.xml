@@ -4,9 +4,9 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Camera is used only by the document scanner (CameraX + Dynamsoft Capture
-         Vision), which prompts for this at runtime. Gallery access uses the
-         Storage Access Framework, which needs no read/storage permission. -->
+    <!-- Camera is used only by the ML Kit document scanner, which manages the
+         runtime prompt itself. Gallery access uses the Storage Access Framework,
+         which needs no read/storage permission. -->
     <uses-permission android:name="android.permission.CAMERA" />
 
     <uses-feature
