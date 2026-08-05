@@ -1,5 +1,5 @@
-import { addDocument, deleteDocument, updateStatus, listPending, listUploaded } from './db.js?v=14';
-import { openScanner } from './scanner.js?v=14';
+import { addDocument, deleteDocument, updateStatus, listPending, listUploaded } from './db.js?v=15';
+import { openScanner } from './scanner.js?v=15';
 
 // ---------------- constants / helpers ----------------
 const DEMO_USER = 'hdfc';
@@ -272,11 +272,12 @@ async function onScan(appNo) {
         } catch (err) {
             // Camera couldn't start → explain, and offer the native camera as fallback.
             const name = (err && err.name) || 'Error';
+            const detail = (err && err.message) ? `: ${err.message}` : '';
             const msg = name === 'NotAllowedError'
                 ? 'Camera permission was denied. Enable camera access for this site in your browser settings, then try again.'
                 : name === 'NotFoundError'
                     ? 'No camera was found on this device.'
-                    : `Camera couldn't start (${name}). You can use your phone's camera app instead.`;
+                    : `Camera couldn't start (${name}${detail}). You can use your phone's camera app instead.`;
             modal({
                 icon: '📷', title: 'Camera unavailable', body: msg,
                 actions: [

@@ -5,7 +5,12 @@
 // Multi-page: the scanner stays open after each capture (continuous scanning)
 // and we accumulate every accepted page until the user closes it.
 
-const DDS_URL = 'https://cdn.jsdelivr.net/npm/dynamsoft-document-scanner@1.5.0/dist/dds.bundle.esm.js';
+// Two independent CDN mirrors for the SDK — if one is unreachable (blocked
+// network, transient CDN issue) the other is tried before giving up.
+const DDS_URLS = [
+    'https://cdn.jsdelivr.net/npm/dynamsoft-document-scanner@1.5.0/dist/dds.bundle.esm.js',
+    'https://unpkg.com/dynamsoft-document-scanner@1.5.0/dist/dds.bundle.esm.js',
+];
 
 // Dynamsoft license key (client-side keys are expected — usage is enforced by
 // Dynamsoft's license server, not by keeping this secret).
@@ -13,24 +18,32 @@ const DYNAMSOFT_LICENSE = 'DLS2eyJoYW5kc2hha2VDb2RlIjoiMTA2MDc3MTAxLU1UQTJNRGMzT
 
 let DocumentScannerCtor = null;
 async function loadDocumentScanner() {
-    if (!DocumentScannerCtor) {
-        const mod = await import(DDS_URL);
-        DocumentScannerCtor = mod.DocumentScanner;
+    if (DocumentScannerCtor) return DocumentScannerCtor;
+    let lastErr;
+    for (const url of DDS_URLS) {
+        try {
+            const mod = await import(url);
+            DocumentScannerCtor = mod.DocumentScanner;
+            return DocumentScannerCtor;
+        } catch (err) {
+            lastErr = err;
+        }
     }
-    return DocumentScannerCtor;
+    throw lastErr;
 }
 
 export async function openScanner() {
-    const DocumentScanner = await loadDocumentScanner();
-
     const host = document.createElement('div');
     host.id = 'scanner-host';
     host.style.cssText = 'position:fixed;inset:0;z-index:90;';
+    host.innerHTML = '<div class="scanner-loading">Loading scanner…</div>';
     document.getElementById('modal-root').appendChild(host);
 
     const pages = [];
     let scanner = null;
     try {
+        const DocumentScanner = await loadDocumentScanner();
+        host.innerHTML = '';
         scanner = new DocumentScanner({
             license: DYNAMSOFT_LICENSE,
             container: host,

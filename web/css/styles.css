@@ -224,5 +224,9 @@ input.error { border-color: var(--error); }
    Document Scanner widget — see js/scanner.js. #scanner-host is just the
    full-screen mount point it's given. */
 #scanner-host { background: #000; }
+.scanner-loading {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    color: rgba(255, 255, 255, .85); font-size: 1rem; font-weight: 600;
+}
 
 .hidden { display: none !important; }
